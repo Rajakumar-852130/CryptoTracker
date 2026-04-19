@@ -8,11 +8,31 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class CryptoService {
 
     private final String MARKETS_API_URL = "https://api.coingecko.com/api/v3/coins/markets?vs_currency=%s&order=market_cap_desc&sparkline=false";
+
+    // Simple In-Memory Cache
+    private static class CachedData {
+        List<CryptoCoin> data;
+        long timestamp;
+
+        CachedData(List<CryptoCoin> data) {
+            this.data = data;
+            this.timestamp = System.currentTimeMillis();
+        }
+
+        boolean isExpired() {
+            // Cache for 120 seconds (2 minutes)
+            return System.currentTimeMillis() - timestamp > 120000;
+        }
+    }
+
+    private final Map<String, CachedData> cache = new ConcurrentHashMap<>();
 
     public List<CryptoCoin> getTop10Coins(String currency) {
         String url = String.format(MARKETS_API_URL, currency.toLowerCase()) + "&per_page=10&page=1";
@@ -20,7 +40,6 @@ public class CryptoService {
     }
 
     public List<CryptoCoin> getMarketCoins(String currency) {
-        // Fetch top 100 coins
         String url = String.format(MARKETS_API_URL, currency.toLowerCase()) + "&per_page=100&page=1";
         return fetchCoinsFromUrl(url);
     }
@@ -32,6 +51,13 @@ public class CryptoService {
     }
 
     private List<CryptoCoin> fetchCoinsFromUrl(String url) {
+        // Check Cache first
+        if (cache.containsKey(url) && !cache.get(url).isExpired()) {
+            System.out.println("[Cache HIT] Serving " + url + " from cache.");
+            return cache.get(url).data;
+        }
+
+        System.out.println("[Cache MISS] Fetching " + url + " from CoinGecko.");
         try {
             RestTemplate restTemplate = new RestTemplate();
             org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
@@ -54,14 +80,25 @@ public class CryptoService {
                 double change24h = coinJson.optDouble("price_change_percentage_24h", 0.0);
                 coinList.add(new CryptoCoin(id, name, image, price, change24h));
             }
+
+            // Save to Cache
+            if (!coinList.isEmpty()) {
+                cache.put(url, new CachedData(coinList));
+            }
             return coinList;
 
         } catch (org.springframework.web.client.HttpClientErrorException.TooManyRequests e) {
-            System.err.println("[Rate Limit] CoinGecko API rate limit hit. Please wait a moment.");
+            System.err.println("[Rate Limit] CoinGecko API rate limit hit. Returning cached data if available.");
+            if (cache.containsKey(url)) {
+                return cache.get(url).data; // Return even if expired if we are being rate-limited
+            }
             return new ArrayList<>();
         } catch (Exception e) {
             System.err.println("[Error] Failed to fetch data: " + e.getMessage());
+            if (cache.containsKey(url)) {
+                return cache.get(url).data;
+            }
             return new ArrayList<>();
         }
     }
-}
+}
